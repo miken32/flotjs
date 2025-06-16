@@ -2559,17 +2559,155 @@ Licensed under the MIT license.
             axis.tickDecimals = Math.max(0, maxDec != null ? maxDec : dec);
             axis.tickSize = opts.tickSize || size;
 
-            // Time mode was moved to a plug-in in 0.8, and since so many people use it
-            // we'll add an especially friendly reminder to make sure they included it.
-
             if (opts.mode == "time" && !axis.tickGenerator) {
-                throw new Error("Time mode requires the flot.time plugin.");
+                // pretty handling of time
+
+                // map of app. size of time units in milliseconds
+                var timeUnitSize = {
+                    "second": 1000,
+                    "minute": 60 * 1000,
+                    "hour": 60 * 60 * 1000,
+                    "day": 24 * 60 * 60 * 1000,
+                    "month": 30 * 24 * 60 * 60 * 1000,
+                    "year": 365.2425 * 24 * 60 * 60 * 1000
+                };
+
+                // the allowed tick sizes, after 1 year we use
+                // an integer algorithm
+                var spec = [
+                    [1, "second"], [2, "second"], [5, "second"], [10, "second"],
+                    [30, "second"],
+                    [1, "minute"], [2, "minute"], [5, "minute"], [10, "minute"],
+                    [30, "minute"],
+                    [1, "hour"], [2, "hour"], [4, "hour"],
+                    [8, "hour"], [12, "hour"],
+                    [1, "day"], [2, "day"], [3, "day"],
+                    [0.25, "month"], [0.5, "month"], [1, "month"],
+                    [2, "month"], [3, "month"], [6, "month"],
+                    [1, "year"]
+                ];
+
+                var minSize = 0;
+
+                if (opts.minTickSize != null) {
+                    if (typeof opts.tickSize == "number")
+                        minSize = opts.tickSize;
+                    else
+                        minSize = opts.minTickSize[0] * timeUnitSize[opts.minTickSize[1]];
+                }
+                for (var i = 0; i < spec.length - 1; ++i)
+                    if (delta < (spec[i][0] * timeUnitSize[spec[i][1]]
+                            + spec[i + 1][0] * timeUnitSize[spec[i + 1][1]]) / 2
+                        && spec[i][0] * timeUnitSize[spec[i][1]] >= minSize)
+                        break;
+                size = spec[i][0];
+                unit = spec[i][1];
+                // special-case the possibility of several years
+                if (unit == "year") {
+                    magn = Math.pow(10, Math.floor(Math.log(delta / timeUnitSize.year) / Math.LN10));
+                    norm = (delta / timeUnitSize.year) / magn;
+                    if (norm < 1.5)
+                        size = 1;
+                    else if (norm < 3)
+                        size = 2;
+                    else if (norm < 7.5)
+                        size = 5;
+                    else
+                        size = 10;
+                    size *= magn;
+                }
+                axis.tickSize = opts.tickSize || [size, unit];
+
+                axis.tickGenerator = function(axis) {
+                    var ticks = [],
+                        tickSize = axis.tickSize[0], unit = axis.tickSize[1],
+                        d = new Date(axis.min);
+                    var step = tickSize * timeUnitSize[unit];
+                    if (unit == "second")
+                        d.setUTCSeconds(floorInBase(d.getUTCSeconds(), tickSize));
+                    if (unit == "minute")
+                        d.setUTCMinutes(floorInBase(d.getUTCMinutes(), tickSize));
+                    if (unit == "hour")
+                        d.setUTCHours(floorInBase(d.getUTCHours(), tickSize));
+                    if (unit == "month")
+                        d.setUTCMonth(floorInBase(d.getUTCMonth(), tickSize));
+                    if (unit == "year")
+                        d.setUTCFullYear(floorInBase(d.getUTCFullYear(), tickSize));
+                    // reset smaller components
+                    d.setUTCMilliseconds(0);
+                    if (step >= timeUnitSize.minute)
+                        d.setUTCSeconds(0);
+                    if (step >= timeUnitSize.hour)
+                        d.setUTCMinutes(0);
+                    if (step >= timeUnitSize.day)
+                        d.setUTCHours(0);
+                    if (step >= timeUnitSize.day * 4)
+                        d.setUTCDate(1);
+                    if (step >= timeUnitSize.year)
+                        d.setUTCMonth(0);
+                    var carry = 0, v = Number.NaN, prev;
+                    do {
+                        prev = v;
+                        v = d.getTime();
+                        ticks.push(v);
+                        if (unit == "month") {
+                            if (tickSize < 1) {
+                                // a bit complicated - we'll divide the month
+                                // up but we need to take care of fractions
+                                // so we don't end up in the middle of a day
+                                d.setUTCDate(1);
+                                var start = d.getTime();
+                                d.setUTCMonth(d.getUTCMonth() + 1);
+                                var end = d.getTime();
+                                d.setTime(v + carry * timeUnitSize.hour + (end - start) * tickSize);
+                                carry = d.getUTCHours();
+                                d.setUTCHours(0);
+                            }
+                            else
+                                d.setUTCMonth(d.getUTCMonth() + tickSize);
+                        }
+
+                        else if (unit == "year") {
+                            d.setUTCFullYear(d.getUTCFullYear() + tickSize);
+                        }
+                        else
+                            d.setTime(v + step);
+                    } while (v < axis.max && v != prev);
+                    return ticks;
+                };
+
+                axis.tickFormatter = function (v, axis) {
+                    var d = new Date(v);
+                    // first check global format
+                    if (opts.timeformat != null)
+                        return formatDate(d, opts.timeformat, opts.monthNames);
+                    var t = axis.tickSize[0] * timeUnitSize[axis.tickSize[1]];
+                    var span = axis.max - axis.min;
+                    var suffix = (opts.twelveHourClock) ? " %p" : "";
+                    if (t < timeUnitSize.minute)
+                        fmt = "%h:%M:%S" + suffix;
+                    else if (t < timeUnitSize.day) {
+                        if (span < 2 * timeUnitSize.day)
+                            fmt = "%h:%M" + suffix;
+                        else
+                            fmt = "%b %d %h:%M" + suffix;
+                    }
+                    else if (t < timeUnitSize.month)
+                        fmt = "%b %d";
+                    else if (t < timeUnitSize.year) {
+                        if (span < timeUnitSize.year)
+                            fmt = "%b";
+                        else
+                            fmt = "%b %y";
+                    }
+                    else
+                        fmt = "%y";
+                    return formatDate(d, fmt, opts.monthNames);
+                };
             }
-
-            // Plot supports base-10 axes; any other mode else is handled by a plug-in,
-            // like flot.time.js.
-
-            if (!axis.tickGenerator) {
+            else if (!opts.mode && !axis.tickGenerator) {
+                // Plot supports base-10 axes; any other mode else is handled by a plug-in,
+                // like flot.time.js.
 
                 axis.tickGenerator = function (axis) {
 
@@ -4178,6 +4316,62 @@ Licensed under the MIT license.
 
         // Return the modified object
         return target;
+    }
+
+    // returns a string with the date d formatted according to fmt
+    function formatDate(d, fmt, monthNames) {
+        var leftPad = function(n) {
+            n = "" + n;
+            return n.length == 1 ? "0" + n : n;
+        };
+
+        var r = [];
+        var escape = false, padNext = false;
+        var hours = d.getUTCHours();
+        var isAM = hours < 12;
+
+        if (monthNames == null)
+            monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        if (fmt.search(/%p|%P/) != -1) {
+            if (hours > 12) {
+                hours = hours - 12;
+            } else if (hours == 0) {
+                hours = 12;
+            }
+        }
+
+        for (var i = 0; i < fmt.length; ++i) {
+            var c = fmt.charAt(i);
+            if (escape) {
+                switch (c) {
+                    case 'h': c = "" + hours; break;
+                    case 'H': c = leftPad(hours); break;
+                    case 'M': c = leftPad(d.getUTCMinutes()); break;
+                    case 'S': c = leftPad(d.getUTCSeconds()); break;
+                    case 'd': c = "" + d.getUTCDate(); break;
+                    case 'm': c = "" + (d.getUTCMonth() + 1); break;
+                    case 'y': c = "" + d.getUTCFullYear(); break;
+                    case 'b': c = "" + monthNames[d.getUTCMonth()]; break;
+                    case 'p': c = (isAM) ? ("" + "am") : ("" + "pm"); break;
+                    case 'P': c = (isAM) ? ("" + "AM") : ("" + "PM"); break;
+                    case '0': c = ""; padNext = true; break;
+                }
+                if (c && padNext) {
+                    c = leftPad(c);
+                    padNext = false;
+                }
+                r.push(c);
+                if (!padNext)
+                    escape = false;
+            }
+            else {
+                if (c == "%")
+                    escape = true;
+                else
+                    r.push(c);
+            }
+        }
+        return r.join("");
     }
 
     // round to nearby lower multiple of base
